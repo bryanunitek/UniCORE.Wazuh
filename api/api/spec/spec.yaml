@@ -40,12 +40,12 @@ info:
 
     <SecurityDefinitions />
 
-  version: '4.14.6'
-  x-revision: 'rc2'
+  version: '4.14.7'
+  x-revision: 'rc1'
   title: 'Wazuh API REST'
   license:
     name: 'GPL 2.0'
-    url: 'https://github.com/wazuh/wazuh/blob/v4.14.6/LICENSE'
+    url: 'https://github.com/wazuh/wazuh/blob/v4.14.7/LICENSE'
 
 servers:
   - url: '{protocol}://{host}:{port}'
@@ -3865,8 +3865,6 @@ components:
           $ref: '#/components/schemas/DaemonStatus'
         wazuh-csyslogd:
           $ref: '#/components/schemas/DaemonStatus'
-        wazuh-dbd:
-          $ref: '#/components/schemas/DaemonStatus'
         wazuh-execd:
           $ref: '#/components/schemas/DaemonStatus'
         wazuh-integratord:
@@ -3944,8 +3942,6 @@ components:
           type: array
           items:
             type: object
-        database_output:
-          type: object
         email_alerts:
           type: object
         gcp-pubsub:
@@ -4347,8 +4343,6 @@ components:
           wazuh-authd:
             $ref: '#/components/schemas/LogSummary'
           wazuh-csyslogd:
-            $ref: '#/components/schemas/LogSummary'
-          wazuh-dbd:
             $ref: '#/components/schemas/LogSummary'
           wazuh-execd:
             $ref: '#/components/schemas/LogSummary'
@@ -6950,7 +6944,6 @@ components:
         - client_buffer
         - cluster
         - command
-        - database_output
         - email_alerts
         - global
         - integration
@@ -7743,7 +7736,7 @@ paths:
                 api_version: "v4.5.0"
                 revision: 'beta1'
                 license_name: "GPL 2.0"
-                license_url: "https://github.com/wazuh/wazuh/blob/v4.14.6/LICENSE"
+                license_url: "https://github.com/wazuh/wazuh/blob/v4.14.7/LICENSE"
                 hostname: "wazuh"
                 timestamp: "2019-04-02T08:08:11Z"
 
@@ -10772,7 +10765,6 @@ paths:
                       wazuh-analysisd: running
                       wazuh-authd: stopped
                       wazuh-csyslogd: stopped
-                      wazuh-dbd: stopped
                       wazuh-monitord: running
                       wazuh-execd: running
                       wazuh-integratord: stopped
@@ -12533,7 +12525,6 @@ paths:
                       wazuh-analysisd: "running"
                       wazuh-authd: "running"
                       wazuh-csyslogd: "stopped"
-                      wazuh-dbd: "stopped"
                       wazuh-monitor": "running"
                       wazuh-execd: "running"
                       wazuh-integratord: "stopped"

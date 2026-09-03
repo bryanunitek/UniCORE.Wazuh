@@ -1,5 +1,4 @@
 # Copyright (C) 2015, Wazuh Inc.
-# TODO: mysql and postgresql?
 #
 # Copyright (C) 2015, Wazuh Inc.
 #
@@ -90,8 +89,6 @@ EXTERNAL_LIBBPF=external/libbpf-bootstrap/
 EXTERNAL_DBUS=external/dbus/
 endif
 # XXX Becareful NO EXTRA Spaces here
-PG_CONFIG?=pg_config
-MY_CONFIG?=mysql_config
 PRELUDE_CONFIG?=libprelude-config
 WAZUH_GROUP?=wazuh
 WAZUH_USER?=wazuh
@@ -578,80 +575,6 @@ ifeq (,$(filter ${DISABLE_SYSC}, YES yes y Y 1))
 	SYSCOLLECTOR_LIB+=-lsyscollector
 endif
 
-MI :=
-PI :=
-ifdef DATABASE
-
-	ifeq (${DATABASE},mysql)
-		DEFINES+=-DMYSQL_DATABASE_ENABLED
-
-		ifdef MYSQL_CFLAGS
-			MI = ${MYSQL_CFLAGS}
-		else
-			MI := $(shell sh -c '${MY_CONFIG} --include 2>/dev/null || echo ')
-
-			ifeq (${MI},) # BEGIN MI manual detection
-				ifneq (,$(wildcard /usr/include/mysql/mysql.h))
-					MI="-I/usr/include/mysql/"
-				else
-					ifneq (,$(wildcard /usr/local/include/mysql/mysql.h))
-						MI="-I/usr/local/include/mysql/"
-					endif  #
-				endif  #MI
-
-			endif
-		endif # MYSQL_CFLAGS
-
-		ifdef MYSQL_LIBS
-			ML = ${MYSQL_LIBS}
-		else
-			ML := $(shell sh -c '${MY_CONFIG} --libs 2>/dev/null || echo ')
-
-			ifeq (${ML},)
-				ifneq (,$(wildcard /usr/lib/mysql/*))
-					ML="-L/usr/lib/mysql"
-				else
-					ifneq (,$(wildcard /usr/lib64/mysql/*))
-						ML="-L/usr/lib64/mysql"
-					else
-						ifneq (,$(wildcard /usr/local/lib/mysql/*))
-							ML="-L/usr/local/lib/mysql"
-						else
-							ifneq (,$(wildcard /usr/local/lib64/mysql/*))
-								ML="-L/usr/local/lib64/mysql"
-							endif # local/lib64
-						endif # local/lib
-					endif # lib54
-				endif # lib
-			endif
-		endif # MYSQL_LIBS
-
-		OSSEC_LIBS+=${ML} -lmysqlclient
-
-	else # DATABASE
-
-		ifeq (${DATABASE}, pgsql)
-			DEFINES+=-DPGSQL_DATABASE_ENABLED
-
-			ifneq (${PGSQL_LIBS},)
-				PL:=${PGSQL_LIBS}
-			else
-				PL:=$(shell sh -c '(${PG_CONFIG} --libdir --pkglibdir 2>/dev/null | sed "s/^/-L/g" | xargs ) || echo ')
-			endif
-
-			ifneq (${PGSQL_CFLAGS},)
-				PI:=${PGSQL_CFLAGS}
-			else
-				PI:=$(shell sh -c '(${PG_CONFIG} --includedir --pkgincludedir 2>/dev/null | sed "s/^/-I/g" | xargs ) || echo ')
-			endif
-
-			# XXX need some basic autodetech stuff here.
-
-			OSSEC_LIBS+=${PL} -lpq
-
-		endif # pgsql
-	endif # mysql
-endif # DATABASE
 
 ####################
 #### Target ########
@@ -720,12 +643,6 @@ help: failtarget
 	@echo "   make CA_NAME="DigiCert Assured ID Root CA" 		This flag controls the CA name used to verify the dll and exe files signature. The default value is DigiCert Assured ID Root CA."
 	@echo "   make deps HTTP_REQUEST_BRANCH=main 				Build dependencies for http-request tool from selected branch/tag only if submodule isn't checked out, valid at make deps stage. Allowed values are any existing branch/tag.
 	@echo
-	@echo "Database options: "
-	@echo "   make DATABASE=mysql          Build with MYSQL Support"
-	@echo "                                Use MYSQL_CFLAGS adn MYSQL_LIBS to override defaults"
-	@echo "   make DATABASE=pgsql          Build with PostgreSQL Support "
-	@echo "                                Use PGSQL_CFLAGS adn PGSQL_LIBS to override defaults"
-	@echo
 	@echo "Geoip support: "
 	@echo "   make USE_GEOIP=yes           Build with GeoIP support. Allowed values are auto 1, yes, YES, y and Y, otherwise, the flag is ignored"
 	@echo
@@ -745,7 +662,6 @@ settings:
 	@echo "    DEBUG:              ${DEBUG}"
 	@echo "    DEBUGAD             ${DEBUGAD}"
 	@echo "    INSTALLDIR:         ${INSTALLDIR}"
-	@echo "    DATABASE:           ${DATABASE}"
 	@echo "    ONEWAY:             ${ONEWAY}"
 	@echo "    CLEANFULL:          ${CLEANFULL}"
 	@echo "    RESOURCES_URL:      ${RESOURCES_URL}"
@@ -766,12 +682,6 @@ settings:
 	@echo "    DISABLE_CISCAT:     ${DISABLE_CISCAT}"
 	@echo "    IMAGE_TRUST_CHECKS: ${IMAGE_TRUST_CHECKS}"
 	@echo "    CA_NAME:            ${CA_NAME}"
-	@echo "Mysql settings:"
-	@echo "    includes:           ${MI}"
-	@echo "    libs:               ${ML}"
-	@echo "Pgsql settings:"
-	@echo "    includes:           ${PI}"
-	@echo "    libs:               ${PL}"
 	@echo "Defines:"
 	@echo "    ${DEFINES}"
 	@echo "Compiler:"
@@ -797,7 +707,6 @@ BUILD_SERVER+=wazuh-reportd
 BUILD_SERVER+=wazuh-authd
 BUILD_SERVER+=wazuh-analysisd
 BUILD_SERVER+=wazuh-logtest-legacy
-BUILD_SERVER+=wazuh-dbd -
 BUILD_SERVER+=wazuh-integratord
 BUILD_SERVER+=wazuh-modulesd
 BUILD_SERVER+=wazuh-db
@@ -888,8 +797,8 @@ endif
 .PHONY: winagent
 winagent: external win32/libwinpthread-1.dll win32/libwinpthreadpatched.a ${WAZUH_LIB_OUTPUT_PATH}${LIBGCC_S_NAME} ${WAZUH_LIB_OUTPUT_PATH}${LIBSTDCPP_NAME} win32/version-dll.o win32/version-app.o
 	${MAKE} ${WAZUHEXT_LIB} CFLAGS="-DCLIENT -D_POSIX_C_SOURCE -DWIN32 -DPSAPI_VERSION=1" LIBS="-lwsock32 -lws2_32 -lcrypt32"
-	${MAKE} ${WINDOWS_LIBS} CFLAGS="-DCLIENT -D_POSIX_C_SOURCE -DWIN32 -DPSAPI_VERSION=1"
-	${MAKE} ${WINDOWS_BINS} CFLAGS="-DCLIENT -D_POSIX_C_SOURCE -DWIN32 -DPSAPI_VERSION=1" LIBS="-lwsock32 -lwevtapi -lshlwapi -lcomctl32 -ladvapi32 -lkernel32 -lpsapi -lgdi32 -liphlpapi -lws2_32 -lcrypt32 -lwintrust"
+	${MAKE} ${WINDOWS_LIBS} CFLAGS="-DCLIENT -D_POSIX_C_SOURCE -DWIN32 -DPSAPI_VERSION=1 -D_WIN32_WINNT=0x600"
+	${MAKE} ${WINDOWS_BINS} CFLAGS="-DCLIENT -D_POSIX_C_SOURCE -DWIN32 -DPSAPI_VERSION=1 -D_WIN32_WINNT=0x600" LIBS="-lwsock32 -lwevtapi -lshlwapi -lcomctl32 -ladvapi32 -lkernel32 -lpsapi -lgdi32 -liphlpapi -lws2_32 -lcrypt32 -lwintrust"
 	${MAKE} ${WINDOWS_ACTIVE_RESPONSES} CFLAGS="-DCLIENT -D_POSIX_C_SOURCE -DWIN32 -DPSAPI_VERSION=1" LIBS="-lwsock32 -lwevtapi -lshlwapi -lcomctl32 -ladvapi32 -lkernel32 -lpsapi -lgdi32 -liphlpapi -lws2_32 -lcrypt32 -lwintrust"
 	cd win32/ && ./unix2dos.pl ossec.conf > default-ossec.conf
 	cd win32/ && ./unix2dos.pl help.txt > help_win.txt
@@ -1388,7 +1297,7 @@ TAR := tar -xf
 GUNZIP := gunzip
 GZIP := gzip
 CURL := curl -so
-DEPS_VERSION = 53
+DEPS_VERSION = 54
 RESOURCES_URL_BASE := https://packages.wazuh.com/deps/
 RESOURCES_URL := $(RESOURCES_URL_BASE)$(DEPS_VERSION)
 CPYTHON := cpython
@@ -2057,18 +1966,6 @@ os_maild/%.o: os_maild/%.c
 wazuh-maild: ${os_maild_o}
 	${OSSEC_CCBIN} ${OSSEC_LDFLAGS} $^ ${OSSEC_LIBS} -o $@
 
-#### os_dbd ##########
-
-os_dbd_c := $(wildcard os_dbd/*.c)
-os_dbd_o := $(os_dbd_c:.c=.o)
-
-os_dbd/%.o: os_dbd/%.c
-	${OSSEC_CC} ${OSSEC_CFLAGS} ${MI} ${PI} -DARGV0=\"wazuh-dbd\" -c $^ -o $@
-
-wazuh-dbd: ${os_dbd_o}
-	${OSSEC_CCBIN} ${OSSEC_LDFLAGS} ${MI} ${PI} $^  ${OSSEC_LIBS} -o $@
-
-
 #### os_csyslogd #####
 
 os_csyslogd_c := $(wildcard os_csyslogd/*.c)
@@ -2503,7 +2400,7 @@ ifeq (,${INSTALLDIR})
 endif
 
 ifeq (,$(wildcard ${EXTERNAL_CPYTHON}/python))
-	export WPATH_LIB="'\$$\$$ORIGIN/../../../lib'" && export SOURCE_PATH=${ROUTE_PATH} && export WAZUH_FFI_PATH=${EXTERNAL_LIBFFI} && export LD_LIBRARY_PATH=${ROUTE_PATH} && export ac_cv_header_crypt_h=no && export ac_cv_lib_crypt_crypt=no && cd ${EXTERNAL_CPYTHON} && ./configure --prefix="${WPYTHON_DIR}" --libdir="${WPYTHON_DIR}/lib" --enable-shared --with-openssl="${ROUTE_PATH}/${EXTERNAL_OPENSSL}" LDFLAGS="${ARCH_FLAGS} -L${ROUTE_PATH} -L${ROUTE_PATH}/${EXTERNAL_SQLITE} -L${ROUTE_PATH}/${EXTERNAL_LIBFFI}${TARGET}/.libs -Wl,-rpath,'\$$\$$ORIGIN/../../../lib',--disable-new-dtags" CPPFLAGS="-I${ROUTE_PATH}/${EXTERNAL_OPENSSL}include -I${ROUTE_PATH}/${EXTERNAL_SQLITE} -I${ROUTE_PATH}/${EXTERNAL_LIBFFI}include" LIBS="-lwazuhext" $(CPYTHON_FLAGS) && ${MAKE}
+	export WPATH_LIB="'\$$\$$ORIGIN/../../../lib'" && export SOURCE_PATH=${ROUTE_PATH} && export WAZUH_FFI_PATH=${EXTERNAL_LIBFFI} && export LD_LIBRARY_PATH=${ROUTE_PATH} && export ac_cv_header_crypt_h=no && export ac_cv_search_crypt=no && export ac_cv_search_crypt_r=no && cd ${EXTERNAL_CPYTHON} && ./configure --prefix="${WPYTHON_DIR}" --libdir="${WPYTHON_DIR}/lib" --enable-shared --with-openssl="${ROUTE_PATH}/${EXTERNAL_OPENSSL}" LDFLAGS="${ARCH_FLAGS} -L${ROUTE_PATH} -L${ROUTE_PATH}/${EXTERNAL_SQLITE} -L${ROUTE_PATH}/${EXTERNAL_LIBFFI}${TARGET}/.libs -Wl,-rpath,'\$$\$$ORIGIN/../../../lib',--disable-new-dtags" CPPFLAGS="-I${ROUTE_PATH}/${EXTERNAL_OPENSSL}include -I${ROUTE_PATH}/${EXTERNAL_SQLITE} -I${ROUTE_PATH}/${EXTERNAL_LIBFFI}include" LIBS="-lwazuhext" $(CPYTHON_FLAGS) && ${MAKE}
 endif
 
 build_python: $(WAZUHEXT_LIB)
@@ -2704,10 +2601,10 @@ win32/ui/%.o: win32/ui/%.c
 	${OSSEC_CC} ${OSSEC_CFLAGS} -UOSSECHIDS -DARGV0=\"wazuh-win32ui\" -c $^ -o $@
 
 win32/wazuh-agent.exe: win32/wazuh_agent_resource.o win32/version-app.o win32/icon.o win32/win_agent.o win32/win_service.o win32/win_utils.o os_crypto/md5_sha1_sha256/md5_sha1_sha256_op.o ${rootcheck_o} $(filter-out wazuh_modules/main.o, ${wmodulesd_o}) $(filter-out client-agent/main.o, $(filter-out client-agent/agentd.o, $(filter-out client-agent/event-forward.o, ${client_agent_o}))) $(filter-out logcollector/main.o, ${os_logcollector_o}) $(filter-out os_execd/main.o, ${os_execd_o}) active-response/active_responses.o monitord/rotate_log.o monitord/compress_log.o
-	${OSSEC_CCBIN} -DARGV0=\"wazuh-agent\" -DOSSECHIDS ${OSSEC_LDFLAGS} $^ ${OSSEC_LIBS} ${DBSYNC_LIB} ${RSYNC_LIB} -lwazuh-syscheckd -l:libfimdb.lib libwazuh.a -o $@
+	${OSSEC_CCBIN} -DARGV0=\"wazuh-agent\" -DOSSECHIDS ${OSSEC_LDFLAGS} $^ ${OSSEC_LIBS} ${DBSYNC_LIB} ${RSYNC_LIB} -lwazuh-syscheckd -l:libfimdb.lib libwazuh.a -lkernel32 -o $@
 
 win32/wazuh-agent-eventchannel.exe: win32/wazuh_agent_eventchannel_resource.o win32/version-app.o win32/icon.o win32/win_agent.o win32/win_service.o win32/win_utils.o os_crypto/md5_sha1_sha256/md5_sha1_sha256_op.o ${rootcheck_o} $(filter-out wazuh_modules/main.o, ${wmodulesd_o}) $(filter-out client-agent/main.o, $(filter-out client-agent/agentd.o, $(filter-out client-agent/event-forward.o, ${client_agent_o}))) $(filter-out logcollector/main-event.o, ${os_logcollector_eventchannel_o}) $(filter-out os_execd/main.o, ${os_execd_o}) active-response/active_responses.o monitord/rotate_log.o monitord/compress_log.o
-	${OSSEC_CCBIN} -DARGV0=\"wazuh-agent\" -DOSSECHIDS -DEVENTCHANNEL_SUPPORT ${OSSEC_LDFLAGS} $^ ${OSSEC_LIBS} ${DBSYNC_LIB} ${RSYNC_LIB} -lwazuh-syscheckd-event -l:libfimdb.lib libwazuh.a -lwevtapi -o $@
+	${OSSEC_CCBIN} -DARGV0=\"wazuh-agent\" -DOSSECHIDS -DEVENTCHANNEL_SUPPORT ${OSSEC_LDFLAGS} $^ ${OSSEC_LIBS} ${DBSYNC_LIB} ${RSYNC_LIB} -lwazuh-syscheckd-event -l:libfimdb.lib libwazuh.a -lwevtapi -lkernel32 -o $@
 
 win32/manage_agents.exe: win32/manage_agents_resource.o win32/version-app.o win32/win_service_rk.o ${addagent_o}
 	${OSSEC_CCBIN} -DARGV0=\"manage-agents\" -DMA ${OSSEC_LDFLAGS} $^ ${OSSEC_LIBS} -o $@
@@ -2728,13 +2625,13 @@ win32/agent-auth.exe: win32/auth_resource.o win32/version-app.o win32/win_servic
 	${OSSEC_CCBIN} -DARGV0=\"agent-auth\" -DOSSECHIDS ${OSSEC_LDFLAGS} $^ ${OSSEC_LIBS} -lshlwapi -lwsock32 -lsecur32 -lws2_32 -flto -o $@
 
 win32/restart-wazuh.exe: win32/restart_wazuh_resource.o win32/version-app.o active-response/active_responses.o active-response/restart-wazuh.o shared/cryptography.o shared/dll_load_notify.o shared/debug_op_proc.o shared/time_op.o shared/file_op_proc.o shared/utf8_winapi_wrapper.o shared/utf8_op.o ${WAZUH_LIB} ${WAZUHEXT_LIB}
-	${OSSEC_CCBIN} -DARGV0=\"restart-wazuh\" ${AR_LDFLAGS} $^ -lwintrust -lpsapi -lcrypt32 -lshlwapi -o $@
+	${OSSEC_CCBIN} -DARGV0=\"restart-wazuh\" ${AR_LDFLAGS} $^ -lws2_32 -lwintrust -lpsapi -lcrypt32 -lshlwapi -o $@
 
 win32/route-null.exe: win32/route_null_resource.o win32/version-app.o active-response/active_responses.o active-response/route-null.o shared/cryptography.o shared/dll_load_notify.o shared/debug_op_proc.o shared/time_op.o shared/file_op_proc.o shared/utf8_winapi_wrapper.o shared/utf8_op.o ${WAZUH_LIB} ${WAZUHEXT_LIB}
-	${OSSEC_CCBIN} -DARGV0=\"route-null\" ${AR_LDFLAGS} $^ -lwintrust -lpsapi -lcrypt32 -lshlwapi -o $@
+	${OSSEC_CCBIN} -DARGV0=\"route-null\" ${AR_LDFLAGS} $^ -lws2_32 -lwintrust -lpsapi -lcrypt32 -lshlwapi -o $@
 
 win32/netsh.exe: win32/netsh_resource.o win32/version-app.o active-response/active_responses.o active-response/netsh.o shared/cryptography.o shared/dll_load_notify.o shared/debug_op_proc.o shared/time_op.o shared/file_op_proc.o shared/utf8_winapi_wrapper.o shared/utf8_op.o ${WAZUH_LIB} ${WAZUHEXT_LIB}
-	${OSSEC_CCBIN} -DARGV0=\"netsh\" ${AR_LDFLAGS} $^ -lwintrust -lpsapi -lcrypt32 -lshlwapi -o $@
+	${OSSEC_CCBIN} -DARGV0=\"netsh\" ${AR_LDFLAGS} $^ -lws2_32 -lwintrust -lpsapi -lcrypt32 -lshlwapi -o $@
 
 
 ####################
@@ -2817,7 +2714,6 @@ clean-internals: clean-unit-tests
 	rm -f ${os_maild_o}
 	rm -f ${crypto_o}
 	rm -f ${os_csyslogd_o}
-	rm -f ${os_dbd_o}
 	rm -f ${os_agentlessd_o}
 	rm -f ${os_execd_o}
 	rm -f ${os_logcollector_o} ${os_logcollector_eventchannel_o}
