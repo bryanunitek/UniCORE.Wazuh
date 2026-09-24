@@ -48,6 +48,7 @@ list(APPEND analysisd_flags "-Wl,--wrap,OS_ConnectUnixDomain -Wl,--wrap,OS_SendS
 
 list(APPEND analysisd_names "test_exec")
 list(APPEND analysisd_flags "-Wl,--wrap,OS_SendUnix -Wl,--wrap,wdb_get_agent_info -Wl,--wrap,Eventinfo_to_jsonstr \
+                             -Wl,--wrap,OS_SetSendTimeout \
                              -Wl,--wrap,OS_ReadXML -Wl,--wrap,OS_GetOneContentforElement -Wl,--wrap,OS_ClearXML -Wl,--wrap,StartMQ \
                              -Wl,--wrap,wdb_get_agents_by_connection_status -Wl,--wrap,labels_find -Wl,--wrap,labels_get -Wl,--wrap,labels_free \
                              -Wl,--wrap,OS_IPFoundList \
@@ -187,6 +188,9 @@ LIST(APPEND analysisd_flags "-Wl,--wrap,_minfo -Wl,--wrap,_mwarn")
 
 list(APPEND analysisd_names "test_json_extended")
 list(APPEND analysisd_flags "${DEBUG_OP_WRAPPERS}")
+
+list(APPEND analysisd_names "test_analysisd_upgrade_module")
+list(APPEND analysisd_flags "-Wl,--wrap,OS_ConnectUnixDomain -Wl,--wrap,OS_SendSecureTCP ${DEBUG_OP_WRAPPERS}")
 
 list(LENGTH analysisd_names count)
 math(EXPR count "${count} - 1")
