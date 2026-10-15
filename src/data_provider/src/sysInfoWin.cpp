@@ -820,8 +820,9 @@ void expandPortData(T data, const std::map<pid_t, std::string>& processDataList,
         for (auto i = 0ul; i < data->dwNumEntries; ++i)
         {
             nlohmann::json port;
-            std::make_unique<PortImpl>(std::make_shared<WindowsPortWrapper>(data->table[i], processDataList))->buildPortData(port);
-            result.push_back(port);
+            const WindowsPortWrapper wrapper(data->table[i], processDataList);
+            PortImpl(wrapper).buildPortData(port);
+            result.push_back(std::move(port));
         }
     }
 }
@@ -1200,9 +1201,6 @@ nlohmann::json SysInfo::getUsers() const
         //TODO: Avoid this iteration, move logic to LoggedInUsersProvider
         for (auto& item : collectedLoggedInUser)
         {
-            // By default, user is not logged in.
-            userItem["login_status"] = 0;
-
             // tty,host,time and pid can take more than one value due to different logins.
             if (item["user"] == username)
             {

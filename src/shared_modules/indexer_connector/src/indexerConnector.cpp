@@ -16,10 +16,13 @@
 #include "reflectiveJson.hpp"
 #include "secureCommunication.hpp"
 #include "serverSelector.hpp"
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <grp.h>
+#include <map>
 #include <mutex>
 #include <pwd.h>
 #include <unistd.h>
@@ -274,6 +277,189 @@ static inline void extractErrorInfo(const std::string& errorBody, std::string& t
     }
 }
 
+/**
+ * @brief Replace every control character in place with a space.
+ *
+ * @param value Text to sanitize.
+ */
+static inline void sanitizeLogText(std::string& value) noexcept
+{
+    std::replace_if(
+        value.begin(), value.end(), [](unsigned char character) { return std::iscntrl(character) != 0; }, ' ');
+}
+
+/**
+ * @brief Log the per-item rejections inside a `_bulk` response body that still returned HTTP 200 overall.
+ *        OpenSearch reports these inside `errors`/`items[]` rather than as a transport-level error, so
+ * `extractErrorInfo` (which only understands the top-level `{"error": {...}}` shape) doesn't see them.
+ *        Rejections are aggregated by error type and reason and reported as one entry per distinct pair,
+ * since a single bulk can carry up to ELEMENTS_PER_BULK of them.
+ *
+ * @param responseJson Parsed response body.
+ * @param indexName Name of the index the bulk was sent to.
+ */
+static inline void logBulkItemErrors(const nlohmann::json& responseJson, const std::string& indexName)
+{
+    if (!responseJson.value("errors", false) || !responseJson.contains("items"))
+    {
+        return;
+    }
+
+    // Keyed by (type, reason), holding the number of items rejected with it and the first id seen for it.
+    std::map<std::pair<std::string, std::string>, std::pair<std::size_t, std::string>> rejections;
+
+    for (const auto& item : responseJson.at("items"))
+    {
+        for (const auto& entry : item.items())
+        {
+            const auto& itemData = entry.value();
+            if (itemData.contains("error"))
+            {
+                // Scoped per item: a field that is not the string it is expected to be (an `_id` that
+                // arrives as null, for instance) must not abort the remaining rejections, nor bubble up
+                // and make the caller report a parse failure that never happened.
+                try
+                {
+                    std::string id, type, reason;
+                    if (itemData.contains("_id"))
+                    {
+                        id = itemData.at("_id").get_ref<const std::string&>();
+                    }
+
+                    const auto& error = itemData.at("error");
+                    if (error.contains("type"))
+                    {
+                        type = error.at("type").get_ref<const std::string&>();
+                    }
+                    if (error.contains("reason"))
+                    {
+                        reason = error.at("reason").get_ref<const std::string&>();
+                    }
+
+                    // The document id is partly agent-controlled and the reason echoes the indexer's own error
+                    // text, so strip control characters to keep either from forging log lines.
+                    sanitizeLogText(id);
+                    sanitizeLogText(type);
+                    sanitizeLogText(reason);
+
+                    auto& rejection = rejections[std::make_pair(type, reason)];
+                    if (rejection.first++ == 0)
+                    {
+                        rejection.second = id;
+                    }
+                }
+                catch (const nlohmann::json::exception&)
+                {
+                    logWarn(IC_NAME, "Unparseable rejection entry in the '%s' bulk response.", indexName.c_str());
+                }
+            }
+        }
+    }
+
+    for (const auto& [error, rejection] : rejections)
+    {
+        logWarn(IC_NAME,
+                "%zu document(s) rejected by index '%s' - type: '%s', reason: '%s', sample id: '%s'",
+                rejection.first,
+                indexName.c_str(),
+                error.first.c_str(),
+                error.second.c_str(),
+                rejection.second.c_str());
+    }
+}
+
+/**
+ * @brief Log the failures reported inside a `_delete_by_query` response body that returned HTTP 200 overall.
+ *        That shape carries no `errors` flag, so a partially failed delete is otherwise indistinguishable
+ * from a fully successful one.
+ *
+ * @param responseJson Parsed response body.
+ * @param indexName Name of the index the query was sent to.
+ */
+static inline void logDeleteByQueryIssues(const nlohmann::json& responseJson, const std::string& indexName)
+{
+    if (!responseJson.contains("failures"))
+    {
+        // Not a delete by query response.
+        return;
+    }
+
+    const auto versionConflicts = responseJson.value("version_conflicts", 0);
+    const auto& failures = responseJson.at("failures");
+
+    if (versionConflicts == 0 && failures.empty())
+    {
+        return;
+    }
+
+    std::string sampleId, sampleReason;
+    if (!failures.empty())
+    {
+        const auto& failure = failures.at(0);
+        sampleId = failure.value("id", "");
+        if (failure.contains("cause"))
+        {
+            // Document-level failure.
+            sampleReason = failure.at("cause").value("reason", "");
+        }
+        else if (failure.contains("reason") && failure.at("reason").is_object())
+        {
+            // Search-phase failure: no document id, the cause sits under "reason" instead.
+            sampleReason = failure.at("reason").value("reason", "");
+        }
+
+        // Same exposure as the bulk path: the id is partly agent-controlled and the reason echoes the
+        // indexer's own error text.
+        sanitizeLogText(sampleId);
+        sanitizeLogText(sampleReason);
+    }
+
+    logWarn(IC_NAME,
+            "Delete by query on index '%s' completed with issues - version_conflicts: %d, failures: %zu, sample id: "
+            "'%s', sample reason: '%s'",
+            indexName.c_str(),
+            versionConflicts,
+            failures.size(),
+            sampleId.c_str(),
+            sampleReason.c_str());
+}
+
+/**
+ * @brief Report the issues carried by a response body that returned HTTP 200 overall, for both the `_bulk`
+ *        and the `_delete_by_query` shapes.
+ *
+ * @param indexName Name of the index the request was sent to.
+ * @param responseBody Raw response body.
+ */
+static inline void logResponseIssues(const std::string& indexName, const std::string& responseBody) noexcept
+{
+    // Skip the parse for the common, fully successful `_bulk` case: that body can reach several MB at full
+    // bulk size and holds nothing worth reporting. A `_delete_by_query` response never carries "errors":true
+    // regardless of its outcome, so it is told apart by its "failures" key instead - those bodies are small
+    // either way.
+    // Tolerate whitespace around the separator: a body serialized as `"errors" : true` must not slip
+    // through the fast path, or the rejections it carries would go unreported exactly as before this fix.
+    const auto errorsKey = responseBody.find(R"("errors")");
+    const auto hasBulkErrors = errorsKey != std::string::npos &&
+                               responseBody.find("true", errorsKey) < responseBody.find_first_of(",}", errorsKey);
+    const auto looksLikeDeleteByQuery = responseBody.find(R"("failures")") != std::string::npos;
+    if (!hasBulkErrors && !looksLikeDeleteByQuery)
+    {
+        return;
+    }
+
+    try
+    {
+        const auto responseJson = nlohmann::json::parse(responseBody);
+        logBulkItemErrors(responseJson, indexName);
+        logDeleteByQueryIssues(responseJson, indexName);
+    }
+    catch (const std::exception&)
+    {
+        logError(IC_NAME, "Failed to parse response body JSON.");
+    }
+}
+
 // ------- IndexerConnector methods implementation -------
 
 nlohmann::json IndexerConnector::getAgentDocumentsIds(const std::string& url,
@@ -407,9 +593,10 @@ void IndexerConnector::sendBulkReactive(const std::vector<std::pair<std::string,
 
     if (!bulkData.empty())
     {
-        const auto onSuccess = [](const std::string& response)
+        const auto onSuccess = [this](const std::string& response)
         {
             logDebug2(IC_NAME, "Response: %s", response.c_str());
+            logResponseIssues(m_indexName, response);
         };
 
         const auto onError = [this, &actions, &url, &secureCommunication, depth](
@@ -489,9 +676,17 @@ void IndexerConnector::diff(const nlohmann::json& responseJson,
         }
     }
 
-    // Iterate over the database and check if the element is in the status vector.
-    for (const auto& [key, value] : m_db->seek(agentId))
+    // Iterate over the database and check if the element is in the status vector. The trailing separator keeps
+    // this an exact per-agent scan: without it, a shorter agent ID prefix-matches a longer sibling's keys too
+    // (RocksDBIterator::valid() is a raw prefix check with no key-boundary awareness).
+    // Named local, not passed inline: seek() takes the key as a non-owning string_view and RocksDBIterator
+    // only reads through it lazily (on the range-for's begin()), so a temporary here would already be destroyed
+    // by the time it's read.
+    const auto agentPrefix = agentId + "_";
+    std::size_t mirrorEntryCount {0};
+    for (const auto& [key, value] : m_db->seek(agentPrefix))
     {
+        ++mirrorEntryCount;
         bool found {false};
         for (auto& [id, data] : status)
         {
@@ -512,13 +707,28 @@ void IndexerConnector::diff(const nlohmann::json& responseJson,
     }
 
     // Iterate over the status vector and check if the element is marked as not found.
-    // This means that the element is in the indexer but not in the database. To solve this, the element will be deleted
+    // This means that the element is in the indexer but not in the database. To solve this, the element will be
+    // deleted. An empty mirror is no exception: on a node that has never processed the agent (it has just moved
+    // there from another cluster node) this removes the previous node's documents, and the full sync the agent is
+    // sending to this node reinserts the current ones. The same deletion on a node that did process the agent means
+    // the mirror was lost, so the event is worth a log line either way.
+    std::size_t deletions {0};
     for (const auto& [id, data] : status)
     {
         if (!data)
         {
             actions.emplace_back(id, true);
+            ++deletions;
         }
+    }
+
+    if (mirrorEntryCount == 0 && deletions > 0)
+    {
+        logWarn(IC_NAME,
+                "Local mirror holds no entry for agent '%s': deleting the %zu document(s) the index reports for it. "
+                "Expected when the agent has just moved to this node; otherwise the mirror was lost.",
+                agentId.c_str(),
+                deletions);
     }
 
     auto url = selector->getNext();
@@ -980,7 +1190,12 @@ IndexerConnector::IndexerConnector(
                 {
                     if (m_useSeekDelete)
                     {
-                        for (const auto& [key, _] : m_db->seek(id))
+                        // Seek-delete publishers send the id without the version suffix their documents were
+                        // indexed with ("<id>_<suffix>", see InventorySync::updateElementID in the vulnerability
+                        // scanner), so the match is the exact id plus every key under "<id>_". A plain seek(id)
+                        // would also sweep siblings sharing the byte prefix (CVE-2023-100 when deleting
+                        // CVE-2023-1), and those sort before "<id>_", so the prefix scan has to be its own seek.
+                        const auto deleteKey = [&](const std::string& key)
                         {
                             logDebug2(IC_NAME, "Added document for deletion with id: %s.", key.c_str());
                             if (!noIndex)
@@ -989,6 +1204,27 @@ IndexerConnector::IndexerConnector(
                             }
 
                             m_db->delete_(key);
+                        };
+
+                        if (id.empty())
+                        {
+                            // An empty id would match every key under "_"; the exact lookup rejects it anyway.
+                            logWarn(IC_NAME, "Ignoring DELETED event with an empty id: %s", data.c_str());
+                        }
+                        else
+                        {
+                            if (std::string value; m_db->get(id, value))
+                            {
+                                deleteKey(id);
+                            }
+
+                            // Named local: seek() only borrows the key as a string_view, read lazily on the
+                            // loop's begin() - a temporary here would already be gone by then.
+                            const auto idPrefix = id + "_";
+                            for (const auto& [key, _] : m_db->seek(idPrefix))
+                            {
+                                deleteKey(key);
+                            }
                         }
                     }
                     else
@@ -1009,7 +1245,10 @@ IndexerConnector::IndexerConnector(
                         builderDeleteByQuery(queryData, id);
                     }
 
-                    for (const auto& [key, _] : m_db->seek(id))
+                    // Named local: seek() only borrows the key as a string_view, read lazily on the loop's
+                    // begin() - a temporary here would already be gone by then.
+                    const auto idPrefix = id + "_";
+                    for (const auto& [key, _] : m_db->seek(idPrefix))
                     {
                         m_db->delete_(key);
                     }
@@ -1042,6 +1281,7 @@ IndexerConnector::IndexerConnector(
                 const auto onSuccess = [this, bulkSize](const std::string& response)
                 {
                     logDebug2(IC_NAME, "Response: %s", response.c_str());
+                    logResponseIssues(m_indexName, response);
 
                     // If the request was successful and the current bulk size is less than ELEMENTS_PER_BULK, increase
                     // the bulk size if the success count is SUCCESS_COUNT_TO_INCREASE_BULK_SIZE
@@ -1310,9 +1550,24 @@ IndexerConnector::IndexerConnector(
                 {
                     if (m_useSeekDelete)
                     {
-                        for (const auto& [key, _] : m_db->seek(id))
+                        // Same match as the index-enabled constructor's DELETED branch: the exact id plus every
+                        // versioned key under "<id>_", never a sibling that merely shares the byte prefix. With no
+                        // bulk request to build, deleting a key that is not there is a harmless no-op.
+                        if (id.empty())
                         {
-                            m_db->delete_(key);
+                            logWarn(IC_NAME, "Ignoring DELETED event with an empty id: %s", data.c_str());
+                        }
+                        else
+                        {
+                            m_db->delete_(id);
+
+                            // Named local: seek() only borrows the key as a string_view, read lazily on the
+                            // loop's begin() - a temporary here would already be gone by then.
+                            const auto idPrefix = id + "_";
+                            for (const auto& [key, _] : m_db->seek(idPrefix))
+                            {
+                                m_db->delete_(key);
+                            }
                         }
                     }
                     else
@@ -1323,7 +1578,10 @@ IndexerConnector::IndexerConnector(
                 // We made the same operation for DELETED_BY_QUERY as for DELETED
                 else if (parsedData.at("operation").get_ref<const std::string&>().compare("DELETED_BY_QUERY") == 0)
                 {
-                    for (const auto& [key, _] : m_db->seek(id))
+                    // Named local: seek() only borrows the key as a string_view, read lazily on the loop's
+                    // begin() - a temporary here would already be gone by then.
+                    const auto idPrefix = id + "_";
+                    for (const auto& [key, _] : m_db->seek(idPrefix))
                     {
                         m_db->delete_(key);
                     }

@@ -93,7 +93,6 @@ static nlohmann::json getProcessInfo(const SysInfoProcess& process)
     nlohmann::json jsProcessInfo{};
     // Current process information
     jsProcessInfo["pid"]        = std::to_string(process->tid);
-    jsProcessInfo["name"]       = process->cmd;
     jsProcessInfo["state"]      = &process->state;
     jsProcessInfo["ppid"]       = process->ppid;
     jsProcessInfo["utime"]      = process->utime;
@@ -121,6 +120,9 @@ static nlohmann::json getProcessInfo(const SysInfoProcess& process)
         }
     }
 
+    // comm is capped at TASK_COMM_LEN; fall back to it whenever cmdline can't give a name.
+    const std::string baseName{commandLine.empty() ? std::string{} : std::filesystem::path(commandLine).filename().string()};
+    jsProcessInfo["name"] = baseName.empty() ? process->cmd : baseName;
     jsProcessInfo["cmd"]        = commandLine;
     jsProcessInfo["argvs"]      = commandLineArgs;
     jsProcessInfo["euser"]      = process->euser;
@@ -541,7 +543,8 @@ nlohmann::json SysInfo::getPorts() const
                     row = Utils::trim(row);
                     Utils::replaceAll(row, "\t", " ");
                     row = Utils::trimRepeated(row, ' ');
-                    std::make_unique<PortImpl>(std::make_shared<LinuxPortWrapper>(portType.first, row))->buildPortData(port);
+                    const LinuxPortWrapper wrapper(portType.first, row);
+                    PortImpl(wrapper).buildPortData(port);
                     inodes.push_back(port.at("inode"));
                     ports.push_back(std::move(port));
                 }
@@ -687,7 +690,33 @@ nlohmann::json SysInfo::getUsers() const
     ShadowProvider shadowProvide;
     auto collectedShadow = shadowProvide.collect();
 
+    // The rules do not depend on the user, and re-reading /etc/sudoers and its includes per
+    // account is expensive.
+    SudoersProvider sudoersProvider;
+    auto collectedSudoers = sudoersProvider.collect();
+
+    // The User_Alias map does not depend on the user either, so build it once for the whole scan
+    // instead of re-parsing it inside isUserSudoer() for every account.
+    auto sudoersUserAliases = SudoersProvider::collectUserAliases(collectedSudoers);
+
     UserGroupsProvider userGroupsProvider;
+
+    // Resolve group membership for every user in a single call. Asking per user repeated
+    // the underlying passwd and group lookups once per user and left no opportunity to
+    // share work between them, which on a host whose accounts come from a network
+    // directory meant one round trip per (user, group) pair.
+    std::set<uid_t> allUids;
+
+    for (const auto& user : collectedUsers)
+    {
+        allUids.insert(static_cast<uid_t>(user["uid"].get<int>()));
+    }
+
+    // An empty set means "every uid" to getGroupNamesByUid(), so only ask when there is
+    // actually something to ask about.
+    const auto groupsByUid = allUids.empty()
+                             ? nlohmann::json::object()
+                             : userGroupsProvider.getGroupNamesByUid(allUids);
 
     for (auto& user : collectedUsers)
     {
@@ -698,15 +727,37 @@ nlohmann::json SysInfo::getUsers() const
         userItem["user_id"] = user["uid"];
         userItem["user_full_name"] = user["description"];
         userItem["user_home"] = user["directory"];
-        userItem["user_is_remote"] = user["include_remote"];
+        userItem["user_is_remote"] = user["is_remote"];
         userItem["user_name"] = username;
         userItem["user_shell"] = user["shell"];
         userItem["user_uid_signed"] = user["uid_signed"];
         userItem["user_group_id_signed"] = user["gid_signed"];
         userItem["user_group_id"] = user["gid"];
 
-        std::set<uid_t> uid {static_cast<uid_t>(user["uid"].get<int>())};
-        auto collectedUsersGroups = userGroupsProvider.getGroupNamesByUid(uid);
+        // getGroupNamesByUid() returns a bare array when asked about a single uid and an
+        // object keyed by uid otherwise, so both shapes have to be handled: a host with
+        // exactly one user yields the array form.
+        nlohmann::json collectedUsersGroups = nlohmann::json::array();
+
+        if (groupsByUid.is_object())
+        {
+            // Keyed exactly as getGroupNamesByUid() built it, from uid_t. Formatting the
+            // narrowed int instead would look up "-2" for uid 4294967294 and find nothing.
+            const auto uid = static_cast<uid_t>(user["uid"].get<int>());
+            const auto entry = groupsByUid.find(std::to_string(uid));
+
+            if (entry != groupsByUid.end())
+            {
+                collectedUsersGroups = *entry;
+            }
+        }
+        else if (groupsByUid.is_array())
+        {
+            collectedUsersGroups = groupsByUid;
+        }
+
+        // The sudoers lookup needs the group names one by one, not concatenated.
+        std::set<std::string> userGroupNames;
 
         if (collectedUsersGroups.empty())
         {
@@ -723,7 +774,9 @@ nlohmann::json SysInfo::getUsers() const
                     accumGroups += secondaryArraySeparator;
                 }
 
-                accumGroups += group.get<std::string>();
+                const auto groupName = group.get<std::string>();
+                accumGroups += groupName;
+                userGroupNames.insert(groupName);
             }
 
             userItem["user_groups"] = accumGroups;
@@ -749,9 +802,6 @@ nlohmann::json SysInfo::getUsers() const
         //TODO: Avoid this iteration, move logic to LoggedInUsersProvider
         for (auto& item : collectedLoggedInUser)
         {
-            // By default, user is not logged in.
-            userItem["login_status"] = 0;
-
             // tty,host,time and pid can take more than one value due to different logins.
             if (item["user"] == username)
             {
@@ -821,23 +871,12 @@ nlohmann::json SysInfo::getUsers() const
         }
 
 
-        SudoersProvider sudoersProvider;
-        auto collectedSudoers = sudoersProvider.collect();
-
-        // By default, user is not sudoer.
         userItem["user_roles"] = UNKNOWN_VALUE;
 
-        for (auto& singleSudoer : collectedSudoers)
+        if (SudoersProvider::isUserSudoer(collectedSudoers, username, userGroupNames, sudoersUserAliases))
         {
-            // Searching in content of header
-            auto header = singleSudoer["header"].get<std::string>();
-
-            if (header.find(username) != std::string::npos)
-            {
-                //TODO: user_roles_sudo_sudo_rule_details has more detailed information.
-                userItem["user_roles"] = "sudo";
-
-            }
+            //TODO: user_roles_sudo_sudo_rule_details has more detailed information.
+            userItem["user_roles"] = "sudo";
         }
 
         result.push_back(std::move(userItem));

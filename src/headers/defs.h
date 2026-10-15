@@ -69,7 +69,7 @@
 
 /* Some global names */
 #define __ossec_name    "Wazuh"
-#define __ossec_version "v4.14.8"
+#define __ossec_version "v4.14.9"
 #define __author        "Wazuh Inc."
 #define __contact       "info@wazuh.com"
 #define __site          "http://www.wazuh.com"
@@ -161,6 +161,10 @@ https://www.gnu.org/licenses/gpl.html\n"
 /* Active Response files */
 #define DEFAULTAR_FILE  "ar.conf"
 #define AR_BINDIR       "active-response/bin"
+/* Number of active response commands that previous agent versions can load */
+#define MAX_AR          64
+/* Maximum number of active response commands that an agent loads */
+#define MAX_AR_COMMANDS 1024
 #ifndef WIN32
 #define DEFAULTAR       "etc/shared/" DEFAULTAR_FILE
 #define AGENTCONFIG     "etc/shared/agent.conf"
@@ -366,6 +370,15 @@ https://www.gnu.org/licenses/gpl.html\n"
 
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0
+#endif
+
+/* Not every agent platform this tree still builds for (AIX, Solaris 10, HP-UX) is guaranteed to define
+ * O_DIRECTORY. Falling back to 0 only loses an early "this must be a directory" check: openat() on a
+ * descriptor that is not a directory fails with ENOTDIR anyway. Note that O_NOFOLLOW deliberately gets
+ * no such fallback -- defining it to 0 would silently disable a security check instead of failing the
+ * build, which is the outcome we want to hear about. */
+#ifndef O_DIRECTORY
+#define O_DIRECTORY 0
 #endif
 
 /* XML global elements */

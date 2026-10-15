@@ -307,6 +307,11 @@ static cJSON* get_srcip_from_win_eventdata(const cJSON *data) {
     return NULL;
 }
 
+// Accepts only the portable username character set, plus '$' anywhere for machine
+// accounts. Anything outside it is rejected, so no separator, quote, whitespace,
+// control or non-ASCII byte reaches the argument vector the username is placed in.
+// '@' is deliberately excluded: passwd and chuser act on local accounts, which
+// cannot carry a realm suffix, so a qualified name could never be locked anyway.
 int is_valid_username(const char *username) {
     if (!username || !*username) {
         return 0;
@@ -324,39 +329,18 @@ int is_valid_username(const char *username) {
         return 0;
     }
 
-    // Must not start with dash, plus, or tilde (Debian constraint)
-    if (username[0] == '-' || username[0] == '+' || username[0] == '~') {
+    // A leading dash would be read as an option by the command the name is passed to
+    if (username[0] == '-') {
         return 0;
     }
 
-    // Check for prohibited characters
     for (size_t i = 0; i < len; i++) {
         char c = username[i];
 
-        // Reject colon (used as field separator in /etc/passwd)
-        if (c == ':') {
+        if (!(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') && !(c >= '0' && c <= '9') &&
+            c != '.' && c != '_' && c != '-' && c != '$') {
             return 0;
         }
-
-        // Reject comma (used in GECOS field)
-        if (c == ',') {
-            return 0;
-        }
-
-        // Reject whitespace characters
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-            return 0;
-        }
-
-        // Reject slash (breaks home directory paths)
-        if (c == '/' || c == '\\') {
-            return 0;
-        }
-    }
-
-    // Reject directory traversal sequence
-    if (strstr(username, "..") != NULL) {
-        return 0;
     }
 
     return 1;
@@ -568,6 +552,13 @@ int get_ip_version(const char *ip) {
         return OS_INVALID;
     }
 
+#ifdef WIN32
+    // Active-response binaries are short-lived processes that never call WSAStartup().
+    // Without it getaddrinfo() fails with WSANOTINITIALISED, so initialize Winsock here.
+    WSADATA wsaData;
+    int wsa_started = (WSAStartup(MAKEWORD(2, 2), &wsaData) == 0);
+#endif
+
     memset(&hint, '\0', sizeof hint);
 
     hint.ai_family = AF_UNSPEC;
@@ -576,6 +567,11 @@ int get_ip_version(const char *ip) {
     ret = getaddrinfo(ip, NULL, &hint, &res);
     if (ret != 0) {
         // getaddrinfo failed, res may not be initialized
+#ifdef WIN32
+        if (wsa_started) {
+            WSACleanup();
+        }
+#endif
         return OS_INVALID;
     }
 
@@ -588,6 +584,12 @@ int get_ip_version(const char *ip) {
         }
         freeaddrinfo(res);
     }
+
+#ifdef WIN32
+    if (wsa_started) {
+        WSACleanup();
+    }
+#endif
 
     return version;
 }

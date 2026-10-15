@@ -119,7 +119,7 @@ DISABLE_JEMALLOC?=no
 DISABLE_SYSC?=no
 DISABLE_CISCAT?=no
 IMAGE_TRUST_CHECKS?=1
-CA_NAME?=DigiCert Assured ID Root CA
+CA_NAME?=Microsoft Identity Verification Root Certificate Authority 2020
 HTTP_REQUEST_BRANCH?=cd50797cfe03c27f3759bdc243fecca6f7535d35
 
 ifeq (${TARGET},winagent)
@@ -194,9 +194,23 @@ endif
 		OSSEC_LIBS+=-lrt -ldl -lm
 		OSSEC_LDFLAGS+=-pthread -lrt -ldl
 		AR_LDFLAGS+=-pthread -lrt -ldl
-		OSSEC_CFLAGS+=-Wl,--start-group
 		USE_AUDIT=yes
 		CC=gcc
+ifeq (,$(filter ${DEBUG} ${TEST} ${CHECK_CENTOS5},YES yes y Y 1))
+		HARDENING_FLAGS := $(shell echo | $(CC) -fstack-protector-strong -xc -c -o /dev/null - > /dev/null 2>&1 && echo -fstack-protector-strong || echo -fstack-protector)
+		HARDENING_FLAGS += -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2
+		HARDENING_LDFLAGS := -Wl,-z,relro -Wl,-z,now
+ifeq (,$(filter ${uname_M},i386 i486 i586 i686))
+		HARDENING_FLAGS += -fPIC
+		OSSEC_LDFLAGS+=-pie
+		AR_LDFLAGS+=-pie
+		CMAKE_OPTS+=-DCMAKE_POSITION_INDEPENDENT_CODE=ON
+endif
+		OSSEC_CFLAGS+=$(HARDENING_FLAGS)
+		OSSEC_LDFLAGS+=$(HARDENING_LDFLAGS)
+		AR_LDFLAGS+=$(HARDENING_LDFLAGS)
+		CMAKE_OPTS+=-DCMAKE_C_FLAGS="$(HARDENING_FLAGS)" -DCMAKE_CXX_FLAGS="$(HARDENING_FLAGS)" -DCMAKE_EXE_LINKER_FLAGS="$(HARDENING_LDFLAGS)" -DCMAKE_SHARED_LINKER_FLAGS="$(HARDENING_LDFLAGS)"
+endif
 ifneq (,$(filter ${USE_AUDIT},YES yes y Y 1))
 		OSSEC_CFLAGS+=-I$(EXTERNAL_AUDIT)lib
 endif
@@ -640,7 +654,7 @@ help: failtarget
 	@echo "   make OPTIMIZE_CPYTHON=yes    						Enable this flag to optimize the python interpreter build, which is performed when used PYTHON_SOURCE. Allowed values are 1, yes, YES, y and Y, otherwise, the flag is ignored"
 	@echo "   make PYTHON_SOURCE=yes       						Used along the deps target. Downloads the sources needed to build the python interpreter. Allowed values are 1, yes, YES, y and Y, otherwise, the flag is ignored"
 	@echo "   make IMAGE_TRUST_CHECKS=1     					This flag controls the dll and exe files signature verification mechanism. Allowed values are 0 (disabled), 1 (warning only) and 2 (full enforce). The default value is 1."
-	@echo "   make CA_NAME="DigiCert Assured ID Root CA" 		This flag controls the CA name used to verify the dll and exe files signature. The default value is DigiCert Assured ID Root CA."
+	@echo "   make CA_NAME="Microsoft Identity Verification Root Certificate Authority 2020" 		This flag controls the CA name used to verify the dll and exe files signature. The default value is Microsoft Identity Verification Root Certificate Authority 2020."
 	@echo "   make deps HTTP_REQUEST_BRANCH=main 				Build dependencies for http-request tool from selected branch/tag only if submodule isn't checked out, valid at make deps stage. Allowed values are any existing branch/tag.
 	@echo
 	@echo "Geoip support: "
@@ -1297,7 +1311,7 @@ TAR := tar -xf
 GUNZIP := gunzip
 GZIP := gzip
 CURL := curl -so
-DEPS_VERSION = 54
+DEPS_VERSION = 55
 RESOURCES_URL_BASE := https://packages.wazuh.com/deps/
 RESOURCES_URL := $(RESOURCES_URL_BASE)$(DEPS_VERSION)
 CPYTHON := cpython
@@ -1948,7 +1962,7 @@ $(WAZUHEXT_LIB): $(EXTERNAL_LIBS)
 	$(OSSEC_SHARED) $(OSSEC_CFLAGS) libwazuhext/*.o -o $@ -static-libgcc -lm
 else
 $(WAZUHEXT_LIB): $(EXTERNAL_LIBS)
-	$(OSSEC_SHARED) $(OSSEC_CFLAGS) -o $@ -Wl,--whole-archive $^ -Wl,--no-whole-archive ${OSSEC_LIBS}
+	$(OSSEC_SHARED) $(OSSEC_CFLAGS) -o $@ -Wl,--whole-archive $^ -Wl,--no-whole-archive $(HARDENING_LDFLAGS) ${OSSEC_LIBS}
 endif
 endif
 endif
@@ -2065,7 +2079,7 @@ endif
 
 ifeq (${TARGET}, winagent)
 ifneq (,$(filter ${TEST},YES yes y Y 1))
-AR_PROGRAMS_DEPS += unit_tests/wrappers/common.o unit_tests/wrappers/windows/handleapi_wrappers.o unit_tests/wrappers/windows/fileapi_wrappers.o unit_tests/wrappers/windows/stat64_wrappers.o unit_tests/wrappers/windows/processthreadsapi_wrappers.o unit_tests/wrappers/windows/libc/stdio_wrappers.o unit_tests/wrappers/windows/system_calls_wrappers.o
+AR_PROGRAMS_DEPS += unit_tests/wrappers/common.o unit_tests/wrappers/windows/handleapi_wrappers.o unit_tests/wrappers/windows/fileapi_wrappers.o unit_tests/wrappers/windows/stat64_wrappers.o unit_tests/wrappers/windows/processthreadsapi_wrappers.o unit_tests/wrappers/windows/libc/stdio_wrappers.o unit_tests/wrappers/windows/system_calls_wrappers.o unit_tests/wrappers/windows/wincrypt_wrappers.o
 endif
 endif
 
@@ -2152,7 +2166,7 @@ $(WAZUH_LIB): $(WAZUHEXT_LIB) $(AR_PROGRAMS_DEPS)
 	$(OSSEC_SHARED) $(OSSEC_CFLAGS) $^ ${OSSEC_LIBS} -o $@ -static-libgcc
 else
 $(WAZUH_LIB): $(WAZUHEXT_LIB) $(AR_PROGRAMS_DEPS)
-	$(OSSEC_SHARED) $(OSSEC_CFLAGS) -o $@ -Wl,--whole-archive $^ -Wl,--no-whole-archive ${OSSEC_LIBS}
+	$(OSSEC_SHARED) $(OSSEC_CFLAGS) -o $@ -Wl,--whole-archive $^ -Wl,--no-whole-archive $(HARDENING_LDFLAGS) ${OSSEC_LIBS}
 endif
 endif
 endif
@@ -2208,7 +2222,7 @@ librootcheck.a: ${rootcheck_o_lib}
 #### FIM ######
 
 wazuh-syscheckd: librootcheck.a libwazuh.a ${WAZUHEXT_LIB} build_shared_modules
-	cd syscheckd && mkdir -p build && cd build && cmake ${SYSCHECK_OS} ${CMAKE_OPTS} -DCMAKE_C_FLAGS="${DEFINES} -pipe -Wall -Wextra -std=gnu99" ${SYSCHECK_TEST} ${SYSCHECK_RELEASE_TYPE} .. && ${MAKE}
+	cd syscheckd && mkdir -p build && cd build && cmake ${SYSCHECK_OS} ${CMAKE_OPTS} -DCMAKE_C_FLAGS="${DEFINES} $(HARDENING_FLAGS) -pipe -Wall -Wextra -std=gnu99" ${SYSCHECK_TEST} ${SYSCHECK_RELEASE_TYPE} .. && ${MAKE}
 
 #### Monitor #######
 
@@ -2665,7 +2679,6 @@ ifneq ($(wildcard external/*/*),)
 	rm -rf $(EXTERNAL_GOOGLE_BENCHMARK)build
 	rm -rf $(EXTERNAL_ROCKSDB)build
 	rm -rf $(EXTERNAL_SIMDJSON)build
-	rm -rf $(EXTERNAL_LIBBPF)build
 	rm -rf $(EXTERNAL_FLATBUFFERS)build
 	rm -rf $(EXTERNAL_LZMA)build
 	-cd ${EXTERNAL_LIBPLIST} && ${MAKE} clean && rm -rf bin/*
