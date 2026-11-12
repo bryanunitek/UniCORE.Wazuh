@@ -319,6 +319,8 @@ ifeq (${uname_S},HP-UX)
 		OSSEC_CFLAGS+=-pthread
 		OSSEC_LDFLAGS+=-lrt -pthread -L. -lwazuhext
 		AR_LDFLAGS+=-lrt -pthread -L. -lwazuhext -lwazuhshared
+		# libxnet is needed for SCM_RIGHTS descriptor passing but makes SO_RCVTIMEO/SO_SNDTIMEO fail with ENOPROTOOPT, so link it only where needed.
+wazuh-logcollector wazuh-modulesd: OSSEC_LDFLAGS+=-lxnet
 ifeq ($(INSTALLDIR),)
 	INSTALLDIR = /var/ossec
 endif
@@ -747,10 +749,15 @@ endif
 endif
 
 ${WAZUH_LIB_OUTPUT_PATH}${LIBSTDCPP_NAME}: ${libstdc++_path}
-	cp $< $@
+	cp $< $@.tmp
 ifneq (${uname_S},AIX)
-	${STRIP_TOOL} -x $@
+	${STRIP_TOOL} -x $@.tmp
 endif
+ifeq (${uname_S},SunOS)
+# Bundled libstdc++ has no RUNPATH, so ld.so.1 loads a second libgcc_s.so.1 from /usr/lib and every C++ throw aborts.
+	elfedit -e 'dyn:runpath $$ORIGIN' $@.tmp
+endif
+	mv $@.tmp $@
 
 ${WAZUH_LIB_OUTPUT_PATH}${LIBGCC_S_NAME}: ${libgcc_s_path}
 	cp $< $@
@@ -1413,7 +1420,11 @@ EXTERNAL_DIR := $(EXTERNAL_RES:%=external/%)
 EXTERNAL_TAR := $(EXTERNAL_RES:%=external/%.tar.gz)
 
 # Shared tools like dependencies
+# http-request is only built by the manager and the Linux agent (data_provider),
+# and the native tar on AIX, HP-UX and Solaris lacks --strip-components
+ifeq (,$(filter ${uname_S},AIX HP-UX SunOS))
 SHARED_RES := http-request
+endif
 SHARED_TAR := $(SHARED_RES:%=shared_modules/%.tar.gz)
 
 .PHONY: deps
@@ -1510,11 +1521,11 @@ CA_BUNDLE := /etc/ssl/certs/ca-certificates.crt
 CACERT_OPT := $(shell test -f $(CA_BUNDLE) && echo "--cacert $(CA_BUNDLE)" || echo "")
 
 shared_modules/http-request.tar.gz:
-	find $(patsubst %.tar.gz,%,$@) -type f -exec false {} + &&\
-	((test -e $(patsubst %.gz,%,$@) || $(CURL) $@ $(CACERT_OPT) -L $(HTTP_REQUEST_URL)) &&\
-	($(GUNZIP) $@ || (rm -f $@ && echo "Error decompressing $@ maybe wrong branch was supplied!" && false)) &&\
-	$(TAR) $(patsubst %.gz,%,$@) --strip-components=1 -C $(patsubst %.tar.gz,%,$@) &&\
-	rm $(patsubst %.gz,%,$@)) || true
+	test -f $(patsubst %.tar.gz,%,$@)/CMakeLists.txt ||\
+	(mkdir -p $(patsubst %.tar.gz,%,$@) && curl -fsS --retry 5 --retry-delay 2 --connect-timeout 20 --max-time 300 $(CACERT_OPT) -L -o $@ $(HTTP_REQUEST_URL) && $(GUNZIP) -f $@ &&\
+	$(TAR) $(patsubst %.gz,%,$@) --strip-components=1 -C $(patsubst %.tar.gz,%,$@) && rm $(patsubst %.gz,%,$@)) &&\
+	test -f $(patsubst %.tar.gz,%,$@)/CMakeLists.txt ||\
+	{ rm -f $@ $(patsubst %.gz,%,$@); echo "Error installing dependency http-request from $(HTTP_REQUEST_URL)"; exit 1; }
 
 ####################
 #### OSSEC Libs ####
@@ -2642,7 +2653,7 @@ win32/restart-wazuh.exe: win32/restart_wazuh_resource.o win32/version-app.o acti
 	${OSSEC_CCBIN} -DARGV0=\"restart-wazuh\" ${AR_LDFLAGS} $^ -lws2_32 -lwintrust -lpsapi -lcrypt32 -lshlwapi -o $@
 
 win32/route-null.exe: win32/route_null_resource.o win32/version-app.o active-response/active_responses.o active-response/route-null.o shared/cryptography.o shared/dll_load_notify.o shared/debug_op_proc.o shared/time_op.o shared/file_op_proc.o shared/utf8_winapi_wrapper.o shared/utf8_op.o ${WAZUH_LIB} ${WAZUHEXT_LIB}
-	${OSSEC_CCBIN} -DARGV0=\"route-null\" ${AR_LDFLAGS} $^ -lws2_32 -lwintrust -lpsapi -lcrypt32 -lshlwapi -o $@
+	${OSSEC_CCBIN} -DARGV0=\"route-null\" ${AR_LDFLAGS} $^ -lws2_32 -liphlpapi -lwintrust -lpsapi -lcrypt32 -lshlwapi -o $@
 
 win32/netsh.exe: win32/netsh_resource.o win32/version-app.o active-response/active_responses.o active-response/netsh.o shared/cryptography.o shared/dll_load_notify.o shared/debug_op_proc.o shared/time_op.o shared/file_op_proc.o shared/utf8_winapi_wrapper.o shared/utf8_op.o ${WAZUH_LIB} ${WAZUHEXT_LIB}
 	${OSSEC_CCBIN} -DARGV0=\"netsh\" ${AR_LDFLAGS} $^ -lws2_32 -lwintrust -lpsapi -lcrypt32 -lshlwapi -o $@

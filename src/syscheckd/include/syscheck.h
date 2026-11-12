@@ -99,6 +99,7 @@ typedef struct diff_data {
 
     char *tmp_folder;
     char *file_origin;
+    char *new_file;
     char *uncompress_file;
     char *compress_tmp_file;
     char *diff_file;
@@ -539,6 +540,11 @@ void audit_rules_to_realtime();
  * @return 0 on success, -1 on error
  */
 int set_auditd_config(void);
+
+/**
+ * @brief Removes the Audit plugin configuration file, if present.
+ */
+void audit_remove_plugin_config(void);
 
 /**
  * @brief Initialize Audit evsents socket
